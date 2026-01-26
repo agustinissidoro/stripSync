@@ -1,0 +1,8 @@
+{
+    "RESET_BUTTON": "GPIO15",
+    "STATUS_PIN": "LED",
+    "GPIO28": {
+        "strip1": [0, 46]
+    }
+    
+}
