@@ -7,7 +7,8 @@ class CommHandler:
         self.poll.register(sys.stdin, uselect.POLLIN)
         self.buffer = ""
         self.strip_names = strip_names
-        self.live_mode = False 
+        self.live_mode = False
+        self.macro_mode = 0  # 0=text, 1=pixel_map binary, 2=DMX binary
 
     def update(self):
         # 1. Batch Read: Check if data is waiting
@@ -53,6 +54,15 @@ class CommHandler:
             print("COMM: Live Mode", "ON" if self.live_mode else "OFF")
             return None
 
+        if parts[0] == "macro":
+            try:
+                mode = int(parts[1]) if len(parts) > 1 else 0
+                self.macro_mode = max(0, min(2, mode))
+                print("COMM: Macro Mode", self.macro_mode)
+            except:
+                pass
+            return None
+
         target = "all"
         payload = parts
         if parts[0] in self.strip_names or parts[0] == "all":
@@ -89,8 +99,21 @@ class CommHandler:
                 except:
                     pattern = None
             return (target, "SET_C_MODE", (mode, pattern), self.live_mode)
-        if cmd in ["start", "stop", "reset"]:
+        if cmd in ["start", "stop", "reset", "save"]:
             return (target, "CMD", cmd.upper(), False)
+
+        if cmd == "config":
+            # config GPIO28 strip1 0 46  — set strip mapping at runtime
+            try:
+                if len(payload) < 5:
+                    return None
+                pin  = payload[1].upper()  # e.g. "GPIO28"
+                name = payload[2]          # e.g. "strip1"
+                start = int(payload[3])
+                end   = int(payload[4])
+                return (target, "CMD_CONFIG", (pin, name, start, end), False)
+            except:
+                return None
 
         prop_map = {
             "color": "SET_COLOR", "brightness": "SET_BRIGHT",
@@ -103,6 +126,15 @@ class CommHandler:
             try:
                 val = int(payload[1])
                 return (target, "CMD_TEST", val, False)
+            except:
+                return None
+
+        if cmd == "pixels":
+            try:
+                nums = [int(x) for x in payload[1:]]
+                if len(nums) % 3 != 0 or len(nums) == 0:
+                    return None
+                return (target, "PIXELS", nums, True)  # always applied live, bypasses pipeline
             except:
                 return None
 

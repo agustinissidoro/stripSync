@@ -30,6 +30,7 @@ class StripInstance:
         self.arg = 5
         self.is_running = True
         self.dirty = True
+        self.pixel_override = False  # True while pixel mapping owns this strip's hardware
         self._buf_target = [(0, 0, 0)] * count
         self._buf_smooth = [(0, 0, 0)] * count
         self._buf_frame = [(0, 0, 0)] * count
@@ -60,6 +61,7 @@ class StripInstance:
         if pattern is not None:
             self.pattern_counts = pattern
     def set_property(self, msg_type, val, live=False):
+        self.pixel_override = False
         if live:
             # LIVE MODE: Precise sequential updates
             if msg_type == "SET_FADE":
@@ -115,6 +117,7 @@ class StripInstance:
             elif msg_type == "SET_JITTER": self.fx.stage_jitter(val)
 
     def apply(self, duration_ms=None, restore_method="last"):
+        self.pixel_override = False
         prev_state = None
         if duration_ms is not None and duration_ms > 0:
             prev_state = self._snapshot_state()
@@ -256,6 +259,8 @@ class StripInstance:
         return self.speed > 0
 
     def needs_render(self):
+        if self.pixel_override:
+            return False
         if self.dirty:
             return True
         if self.is_animating():

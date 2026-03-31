@@ -3,6 +3,7 @@ import micropython
 from comm_handler import CommHandler
 from strip_instance import StripInstance
 from status import StatusBlinker, ResetButton
+from pixel_map import PixelMapReceiver
 
 # Set frequency immediately before any I/O initialization
 machine.freq(250000000)
@@ -17,7 +18,10 @@ DEFAULT_RESET_BUTTON_PIN = None
 strips = {}
 strip_groups = {}
 physical_strips = {}
+strip_to_pin = {}
 comm = None
+pxr = None
+_runtime_config = None  # live config dict; loaded from file once, mutated by 'config' command
 TOTAL_LEDS = 0
 TOTAL_LEDS_BY_PIN = {}
 is_running = True
@@ -42,14 +46,19 @@ def _parse_pin_key(pin_key):
     return DEFAULT_STRIP_PIN
 
 def initialize_system():
-    global strips, strip_groups, physical_strips, TOTAL_LEDS, TOTAL_LEDS_BY_PIN, comm, is_running, status, reset_button
+    global strips, strip_groups, physical_strips, strip_to_pin, TOTAL_LEDS, TOTAL_LEDS_BY_PIN, comm, pxr, is_running, status, reset_button, _runtime_config
     print("\n--- LedManager: System Initializing ---")
-    
-    try:
-        with open('config.json', 'r') as f:
-            strip_config = json.load(f)
-    except:
-        strip_config = {"strip1": [0, 46]}
+
+    # Load from file only on first boot; afterwards _runtime_config is the source of truth
+    if _runtime_config is None:
+        try:
+            with open('config.json', 'r') as f:
+                _runtime_config = json.load(f)
+        except:
+            _runtime_config = {"strip1": [0, 46]}
+
+    # Work on a shallow copy so STATUS_PIN / RESET_BUTTON deletions don't mutate _runtime_config
+    strip_config = dict(_runtime_config)
 
     # Optional status pin (blink LED) and reset button
     status_pin = DEFAULT_STATUS_PIN
@@ -102,7 +111,14 @@ def initialize_system():
             strip_groups[pin_num].append(strips[name])
             print(f"Mapped: GPIO{pin_num} -> {name}")
     
+    # Build reverse map: strip_name -> pin_num (used for PIXELS command routing)
+    strip_to_pin = {}
+    for pin_num, group in strip_groups.items():
+        for s in group:
+            strip_to_pin[s.name] = pin_num
+
     comm = CommHandler(strip_names=list(strips.keys()))
+    pxr = PixelMapReceiver(physical_strips, sorted(physical_strips.keys()))
     status = StatusBlinker(status_pin, interval_ms=1000)
     reset_button = ResetButton(reset_pin, hold_ms=50, active_low=True)
     is_running = True
@@ -118,10 +134,24 @@ while True:
             status.update()
         if reset_button and reset_button.update():
             machine.reset()
+
+        # --- MACRO MODE BRANCH ---
+        macro = comm.macro_mode
+        if macro > 0:
+            # Binary mode: pixel map (1) or DMX (2)
+            # Bypass the entire render pipeline — raw bytes go straight to hardware.
+            pxr.update(macro)
+            if pxr.exit_requested:
+                pxr.exit_requested = False
+                comm.macro_mode = 0
+                print("Binary mode: exited")
+            continue
+
+        # --- TEXT MODE (macro 0) — original flow, unchanged ---
         packets = comm.update()
         frame_dirty = False
         render_all = False
-        
+
         if packets:
             for packet in packets:
                 target, msg_type, val, is_live = packet[:4]
@@ -149,7 +179,6 @@ while True:
                         frame_dirty = False
                         render_all = False
                     elif val == "APPLY":
-                        # Apply to strips
                         targets = _strips_vals if target == "all" else [strips[target]]
                         duration_ms = packet[4] if len(packet) > 4 else None
                         restore_method = packet[5] if len(packet) > 5 else "last"
@@ -157,6 +186,24 @@ while True:
                             s.apply(duration_ms, restore_method)
                         frame_dirty = True
                         render_all = True
+                    elif val == "SAVE":
+                        try:
+                            with open('config.json', 'w') as f:
+                                json.dump(_runtime_config, f)
+                            print("Config saved.")
+                        except Exception as e:
+                            print("Save failed:", e)
+                elif msg_type == "CMD_CONFIG":
+                    # config GPIO28 strip1 0 46 — update runtime config and re-init
+                    pin_key, name, start, end = val
+                    if pin_key not in _runtime_config or not isinstance(_runtime_config[pin_key], dict):
+                        _runtime_config[pin_key] = {}
+                    _runtime_config[pin_key][name] = [start, end]
+                    initialize_system()
+                    _strips_vals = strips.values()
+                    frame_dirty = True
+                    render_all = True
+                    continue
                 elif msg_type == "CMD_TEST":
                     idx = val
                     is_running = False
@@ -169,6 +216,35 @@ while True:
                         hw.write()
                     frame_dirty = False
                     render_all = False
+
+                elif msg_type == "PIXELS":
+                    # Direct pixel write — bypasses all pipeline stages (text-mode pixel mapping).
+                    # Sets pixel_override on targeted strips so the render pipeline doesn't clobber us.
+                    nums = val
+                    n_px = len(nums) // 3
+                    if target == "all":
+                        for pin_num, hw in physical_strips.items():
+                            n = min(n_px, TOTAL_LEDS_BY_PIN[pin_num])
+                            for i in range(n):
+                                j = i * 3
+                                hw[i] = (nums[j], nums[j + 1], nums[j + 2])
+                            hw.write()
+                        for s in _strips_vals:
+                            s.pixel_override = True
+                    else:
+                        s = strips.get(target)
+                        if s:
+                            pin_num = strip_to_pin.get(target)
+                            hw = physical_strips.get(pin_num)
+                            if hw:
+                                n = min(n_px, s.count)
+                                off = s.start_index
+                                for i in range(n):
+                                    j = i * 3
+                                    hw[off + i] = (nums[j], nums[j + 1], nums[j + 2])
+                                hw.write()
+                            s.pixel_override = True
+                    frame_dirty = False
 
                 # --- STRIP PROPERTY ROUTING ---
                 else:
