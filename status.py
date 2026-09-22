@@ -26,6 +26,8 @@ def _parse_pin_entry(pin_entry):
 class StatusBlinker:
     def __init__(self, pin_entry="LED", interval_ms=1000, active_low=None):
         self.interval_ms = interval_ms
+        self.base_interval_ms = interval_ms
+        self.flash_until = None
         self.last_toggle = time.ticks_ms()
         self.state = False
         self.led, self.active_low = self._init_pin(pin_entry, active_low)
@@ -56,11 +58,29 @@ class StatusBlinker:
             out = not state if self.active_low else state
             self.led.value(1 if out else 0)
 
+    def flash(self, duration_ms=3000, interval_ms=100):
+        # Blink fast for duration_ms, then fall back to the normal status blink.
+        # Non-blocking: the main loop keeps reading serial while this runs.
+        now = time.ticks_ms()
+        self.interval_ms = interval_ms
+        self.flash_until = time.ticks_add(now, duration_ms)
+        self.last_toggle = now
+        self.state = True
+        self._set(True)
+
     def update(self):
-        if time.ticks_diff(time.ticks_ms(), self.last_toggle) >= self.interval_ms:
+        now = time.ticks_ms()
+        if self.flash_until is not None and time.ticks_diff(now, self.flash_until) >= 0:
+            self.flash_until = None
+            self.interval_ms = self.base_interval_ms
+            self.last_toggle = now
+            self.state = False
+            self._set(False)
+            return
+        if time.ticks_diff(now, self.last_toggle) >= self.interval_ms:
             self.state = not self.state
             self._set(self.state)
-            self.last_toggle = time.ticks_ms()
+            self.last_toggle = now
 
 class ResetButton:
     def __init__(self, pin_entry=None, hold_ms=50, active_low=True):

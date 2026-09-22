@@ -103,15 +103,35 @@ class CommHandler:
             return (target, "CMD", cmd.upper(), False)
 
         if cmd == "config":
-            # config GPIO28 strip1 0 46  — set strip mapping at runtime
+            # config clearall               — wipe entire runtime config
+            # config GPIO28 remove          — remove a pin's strip handler entirely
+            # config GPIO28 strip1 0-46 [strip2 47-90 ...]  — (re)define all strips on a pin
+            #   (one message covers one pin; sending it again replaces that pin's whole mapping)
             try:
-                if len(payload) < 5:
+                if len(payload) < 2:
                     return None
-                pin  = payload[1].upper()  # e.g. "GPIO28"
-                name = payload[2]          # e.g. "strip1"
-                start = int(payload[3])
-                end   = int(payload[4])
-                return (target, "CMD_CONFIG", (pin, name, start, end), False)
+                if payload[1] == "clearall":
+                    return (target, "CMD_CONFIG_CLEARALL", None, False)
+
+                pin = payload[1].upper()  # e.g. "GPIO28"
+
+                if len(payload) == 3 and payload[2] == "remove":
+                    return (target, "CMD_CONFIG_REMOVE", pin, False)
+
+                rest = payload[2:]
+                if len(rest) < 2 or len(rest) % 2 != 0:
+                    return None
+                blocks = {}
+                for i in range(0, len(rest), 2):
+                    name = rest[i]
+                    rng = rest[i + 1]
+                    if '-' not in rng:
+                        return None
+                    lo_str, hi_str = rng.split('-', 1)
+                    blocks[name] = [int(lo_str), int(hi_str)]
+                if not blocks:
+                    return None
+                return (target, "CMD_CONFIG", (pin, blocks), False)
             except:
                 return None
 
@@ -123,11 +143,28 @@ class CommHandler:
         }
 
         if cmd == "test":
+            # "test;" alone -> flash the on-board status LED for 3s (link check).
+            # "test N;"     -> light physical LED index N on every pin.
+            if len(payload) < 2:
+                return (target, "CMD_TEST", None, False)
             try:
                 val = int(payload[1])
                 return (target, "CMD_TEST", val, False)
             except:
                 return None
+
+        if cmd == "flashall":
+            # "flashall;" / "flashall N;" -> blink every declared pixel on every
+            # pin for N ms (default 3000). Always global: target prefix ignored.
+            duration_ms = 3000
+            if len(payload) > 1:
+                try:
+                    duration_ms = int(payload[1])
+                except:
+                    duration_ms = 3000
+            if duration_ms <= 0:
+                duration_ms = 3000
+            return ("all", "CMD_FLASH_ALL", duration_ms, False)
 
         if cmd == "pixels":
             try:

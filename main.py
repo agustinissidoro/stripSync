@@ -28,6 +28,14 @@ is_running = True
 status = None
 reset_button = None
 
+# flashall state (non-blocking blink of every declared pixel)
+FLASH_ALL_INTERVAL_MS = 250
+FLASH_ALL_COLOR = (255, 255, 255)
+flash_all_until = None       # None when idle
+flash_all_next_ms = 0
+flash_all_on = False
+flash_all_prev_running = True
+
 def _parse_pin_key(pin_key):
     if isinstance(pin_key, int):
         return pin_key
@@ -46,8 +54,11 @@ def _parse_pin_key(pin_key):
     return DEFAULT_STRIP_PIN
 
 def initialize_system():
-    global strips, strip_groups, physical_strips, strip_to_pin, TOTAL_LEDS, TOTAL_LEDS_BY_PIN, comm, pxr, is_running, status, reset_button, _runtime_config
+    global strips, strip_groups, physical_strips, strip_to_pin, TOTAL_LEDS, TOTAL_LEDS_BY_PIN, comm, pxr, is_running, status, reset_button, _runtime_config, flash_all_until
     print("\n--- LedManager: System Initializing ---")
+
+    # A re-init rebuilds the hardware objects, so drop any flashall in progress
+    flash_all_until = None
 
     # Load from file only on first boot; afterwards _runtime_config is the source of truth
     if _runtime_config is None:
@@ -194,11 +205,27 @@ while True:
                         except Exception as e:
                             print("Save failed:", e)
                 elif msg_type == "CMD_CONFIG":
-                    # config GPIO28 strip1 0 46 — update runtime config and re-init
-                    pin_key, name, start, end = val
-                    if pin_key not in _runtime_config or not isinstance(_runtime_config[pin_key], dict):
-                        _runtime_config[pin_key] = {}
-                    _runtime_config[pin_key][name] = [start, end]
+                    # config GPIO28 strip1 0-46 [strip2 47-90 ...] — replace this pin's whole mapping
+                    pin_key, blocks = val
+                    _runtime_config[pin_key] = blocks
+                    initialize_system()
+                    _strips_vals = strips.values()
+                    frame_dirty = True
+                    render_all = True
+                    continue
+                elif msg_type == "CMD_CONFIG_REMOVE":
+                    # config GPIO28 remove — drop that pin's strip handler entirely
+                    pin_key = val
+                    if pin_key in _runtime_config:
+                        del _runtime_config[pin_key]
+                    initialize_system()
+                    _strips_vals = strips.values()
+                    frame_dirty = True
+                    render_all = True
+                    continue
+                elif msg_type == "CMD_CONFIG_CLEARALL":
+                    # config clearall — wipe the entire runtime config
+                    _runtime_config.clear()
                     initialize_system()
                     _strips_vals = strips.values()
                     frame_dirty = True
@@ -206,6 +233,13 @@ while True:
                     continue
                 elif msg_type == "CMD_TEST":
                     idx = val
+                    if idx is None:
+                        # Connection check: flash the on-board LED for 3s.
+                        # Rendering keeps running; the blinker restores itself.
+                        if status:
+                            status.flash(3000, 100)
+                        print("test")
+                        continue
                     is_running = False
                     for pin_num, hw in physical_strips.items():
                         total = TOTAL_LEDS_BY_PIN[pin_num]
@@ -216,6 +250,19 @@ while True:
                         hw.write()
                     frame_dirty = False
                     render_all = False
+
+                elif msg_type == "CMD_FLASH_ALL":
+                    # Blink every declared pixel on every pin for val ms.
+                    # Owns the hardware while it runs: rendering is paused and
+                    # restored afterwards, so no strip state is modified.
+                    flash_all_prev_running = is_running
+                    is_running = False
+                    now_f = time.ticks_ms()
+                    flash_all_until = time.ticks_add(now_f, val)
+                    flash_all_next_ms = now_f
+                    flash_all_on = False
+                    print("flashall")
+                    continue
 
                 elif msg_type == "PIXELS":
                     # Direct pixel write — bypasses all pipeline stages (text-mode pixel mapping).
@@ -252,6 +299,28 @@ while True:
                     for s in targets:
                         s.set_property(msg_type, val, live=is_live)
                     frame_dirty = True
+
+        # flashall driver — runs between frames, never blocks the serial read
+        if flash_all_until is not None:
+            now_f = time.ticks_ms()
+            if time.ticks_diff(now_f, flash_all_until) >= 0:
+                for hw in physical_strips.values():
+                    hw.fill((0, 0, 0))
+                    hw.write()
+                flash_all_until = None
+                is_running = flash_all_prev_running
+                # Force a full repaint so the strips come back as they were.
+                for s in _strips_vals:
+                    s.pixel_override = False
+                    s.dirty = True
+                render_all = True
+            elif time.ticks_diff(now_f, flash_all_next_ms) >= 0:
+                flash_all_on = not flash_all_on
+                c = FLASH_ALL_COLOR if flash_all_on else (0, 0, 0)
+                for hw in physical_strips.values():
+                    hw.fill(c)
+                    hw.write()
+                flash_all_next_ms = time.ticks_add(now_f, FLASH_ALL_INTERVAL_MS)
 
         # Timed apply expiration
         now_ms = time.ticks_ms()
