@@ -83,6 +83,14 @@ class SpatialEngine:
                 out_buffer[i] = colors[(i + pos) % self.count]
             return out_buffer
 
+        # Mode 6: cycle the whole buffer -- every LED shows the same color,
+        # sampled from the buffer at the moving position (inverse of mode 1)
+        elif mode == 6:
+            c = colors[pos]
+            for i in range(self.count):
+                out_buffer[i] = c
+            return out_buffer
+
         # Mode 5: Exact Loading Bar
         elif mode == 5:
             elapsed = time.ticks_diff(time.ticks_ms(), self.loading_start_ms)

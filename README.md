@@ -248,8 +248,15 @@ Spatial modes (mode N)
 - 5  Loading bar, filling over load_time ms. Direction sets the origin: right
      fills from the first pixel, left from the last, pingpong from the center.
      Once full it stays full — re-send "mode 5;" or "load_time N;" to restart.
+- 6  Cycle the whole buffer. The entire strip shows one color at a time, taken
+     from the buffer at the moving position — the inverse of mode 1. With a
+     gradient this sweeps the strip through every color in turn; with blocks or
+     pattern it steps between them. One full sweep covers the strip's length, so
+     the cycle time is count * speed ms. direction right or left wraps at the
+     end (visible jump unless the first and last color match); pingpong reverses
+     instead, which is smooth for any color set.
 
-Modes 1, 4 and 5 follow the direction setting. Modes 2 and 3 use a fixed
+Modes 1, 4, 5 and 6 follow the direction setting. Modes 2 and 3 use a fixed
 internal argument of 5 (blink duty out of 10, sparkle density out of 256); there
 is no serial command to change it.
 
